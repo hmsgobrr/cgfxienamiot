@@ -1,3 +1,4 @@
+#include <SPI.h>
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <WiFi.h>
@@ -80,7 +81,7 @@ void update() {
 
         /// GET: INTERVAL NYIRAM
         gete = httpGETRequest(GET_TIMES);
-        DeserializationError error = deserializeJson(doc, gete.c_str());
+        error = deserializeJson(doc, gete.c_str());
         if (error) {
             Serial.print(F("deserializeJson() failed: "));
             Serial.println(error.f_str());
