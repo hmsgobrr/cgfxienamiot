@@ -116,10 +116,10 @@ void post() {
         time += now.year();
 
         JsonDocument doc;
-        doc["fields"]["ph"] = getPH();
-        doc["fields"]["tds"] = gettds();
-        doc["fields"]["temp"] = getTMP();
-        doc["fields"]["time"] = time.c_str();
+        doc["fields"]["ph"]["doubleValue"] = getPH();
+        doc["fields"]["tds"]["doubleValue"] = gettds();
+        doc["fields"]["temp"]["doubleValue"] = getTMP();
+        doc["fields"]["time"]["stringValue"] = time.c_str();
         String jeson;
         serializeJson(doc, jeson);
 
