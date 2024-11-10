@@ -1,124 +1,201 @@
-#include <SPI.h>
-#include <Arduino.h>
-#include <ArduinoJson.h>
+ // Date and time functions using a DS3231 RTC connected via I2C and Wire lib
+#include "RTClib.h"
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <ArduinoJson.h>
 
-#include "RTClib.h"
+#define TdsSensorPin 33
+const int relay = 5;
+#define VREF 3.3              // analog reference voltage(Volt) of the ADC
+#define SCOUNT  30            // sum of sample point
 
-#include "firebase.h"
-#include "tds.h"
-#include "ph.h"
+int analogBuffer[SCOUNT];     // store the analog value in the array, read from ADC
+int analogBufferTemp[SCOUNT];
+int analogBufferIndex = 0;
+int copyIndex = 0;
 
-#define MAXJAM 50               // maksimal 50 waktu penyiraman berbeda dalam sehari
-#define REL 5                   // PIN RELAY
-#define TOL 15                  // Toleransi telat meniram (menit)
-#define INTERVAL_AMBIL 60       // Akan ngambil data (interval + waktu nyiram) tiap 60 detik
-#define INTERVAL_UPDATE 5      // Akan ngambil data (interval + waktu nyiram) tiap 60 detik
+float averageVoltage = 0;
+float tdsValue = 0;
+float temperature = 25;       // current temperature for compensation
 
+const char* ssid = "CIKUTRA 13";
+const char* password = "cikutra013";
+String time_str;
 
-bool isPumpOn = false;
-unsigned long pumpStartTime = 0;
-
-RTC_DS3231 rtc;
-WiFiClient client;
-HTTPClient http;
-DateTime now;
-
+const int MAXJAM = 50;
 char jams[7][MAXJAM];
-int lenj = 0;
+int jamslen;
 int interval = 10;
 
-unsigned long lastUpdate = millis(), lastAmbil;
+const int TOL = 10;         // Toleransi keterlambatan menyiram (karena perangkat mati atau hal lain), dalam menit
+const int INTER_POST = 5;   // Interval POST data ph, suhu, dan tds, dalam detik
+const int INTER_GET = 2;    // Interval GET data setting jam-jam, dan durasi penyiraman, dalam detik;
 
-String httpGETRequest(const char* serverName) {
-    // Your Domain name with URL path or IP address with path
-    http.begin(client, serverName);
+HTTPClient http;
+RTC_DS3231 rtc;
 
-    // If you need Node-RED/server authentication, insert user and password below
-    //http.setAuthorization("REPLACE_WITH_SERVER_USERNAME", "REPLACE_WITH_SERVER_PASSWORD");
+char daysOfTheWeek[7][12] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
 
-    // Send HTTP POST request
-    int httpResponseCode = http.GET();
+//ph
 
-    String payload = "{}"; 
+#include <ph4502c_sensor.h>
 
-    if (httpResponseCode>0) {
-        Serial.print("HTTP Response code: ");
-        Serial.println(httpResponseCode);
-        payload = http.getString();
+/* Pinout: https://cdn.awsli.com.br/969/969921/arquivos/ph-sensor-ph-4502c.pdf */
+#define PH4502C_TEMPERATURE_PIN 34
+#define PH4502C_PH_PIN 32
+#define PH4502C_PH_TRIGGER_PIN 35S
+#define PH4502C_CALIBRATION 14.8f
+#define PH4502C_READING_INTERVAL 100
+#define PH4502C_READING_COUNT 10
+// NOTE: The ESP32 ADC has a 12-bit resolution (while most arduinos have 10-bit)
+#define ADC_RESOLUTION 4096.0f
+
+// Create an instance of the PH4502C_Sensor
+PH4502C_Sensor ph4502c(
+  PH4502C_PH_PIN,
+  PH4502C_TEMPERATURE_PIN,
+  PH4502C_CALIBRATION,
+  PH4502C_READING_INTERVAL,
+  PH4502C_READING_COUNT,
+  ADC_RESOLUTION
+);
+
+// median filtering algorithm
+int getMedianNum(int bArray[], int iFilterLen){
+  int bTab[iFilterLen];
+  for (byte i = 0; i<iFilterLen; i++)
+  bTab[i] = bArray[i];
+  int i, j, bTemp;
+  for (j = 0; j < iFilterLen - 1; j++) {
+    for (i = 0; i < iFilterLen - j - 1; i++) {
+      if (bTab[i] > bTab[i + 1]) {
+        bTemp = bTab[i];
+        bTab[i] = bTab[i + 1];
+        bTab[i + 1] = bTemp;
+      }
     }
-    else {
-        Serial.print("Error code: ");
-        Serial.println(httpResponseCode);
-    }
-    // Free resources
-    http.end();
-
-    return payload;
+  }
+  if ((iFilterLen & 1) > 0){
+    bTemp = bTab[(iFilterLen - 1) / 2];
+  }
+  else {
+    bTemp = (bTab[iFilterLen / 2] + bTab[iFilterLen / 2 - 1]) / 2;
+  }
+  return bTemp;
 }
 
-void update() {
-    if(WiFi.status()== WL_CONNECTED){
-        /// GET: WAKTU-WAKTU NYIRAM
-        String gete = httpGETRequest(GET_TIMES);
-        JsonDocument doc;
-        DeserializationError error = deserializeJson(doc, gete.c_str());
-        if (error) {
-            Serial.print(F("deserializeJson() failed: "));
-            Serial.println(error.f_str());
-            return;
-        }
-        JsonArray values = doc["fields"]["times"]["arrayValue"]["values"].as<JsonArray>();
-        int i = 0;
-        for (JsonVariant v : values) {
-            const char* strval = v["stringValue"];
-            for (int j = 0; j < 5; j++) {   
-                jams[i][j] = strval[j];
-            }
-            i++;
-        }
+void get_data(){
+    if(WiFi.status()== WL_CONNECTED) {
+        String serverPath = "https://firestore.googleapis.com/v1/projects/cgfxienam/databases/(default)/documents/setting/timer";
+        http.begin(serverPath.c_str());
 
-        /// GET: INTERVAL NYIRAM
-        gete = httpGETRequest(GET_TIMES);
-        error = deserializeJson(doc, gete.c_str());
-        if (error) {
-            Serial.print(F("deserializeJson() failed: "));
-            Serial.println(error.f_str());
-            return;
+        // If you need Node-RED/server authentication, insert user and password below
+        //http.setAuthorization("REPLACE_WITH_SERVER_USERNAME", "REPLACE_WITH_SERVER_PASSWORD");
+
+        // Send HTTP GET request
+        int httpResponseCode = http.GET();
+
+        if (httpResponseCode>0) {
+            Serial.print("HTTP Response code: ");
+            Serial.println(httpResponseCode);
+
+            String payload = http.getString();
+            Serial.println(payload);
+
+            JsonDocument doc;
+            DeserializationError error = deserializeJson(doc, payload.c_str());
+            if (error) {
+                Serial.print(F("deserializeJson() failed: "));
+                Serial.println(error.f_str());
+                return;
+            }
+            JsonArray values = doc["fields"]["times"]["arrayValue"]["values"].as<JsonArray>();
+            memset(jams, 0, sizeof(jams));
+            int i = 0;
+            for (JsonVariant v : values) {
+                const char* strval = v["stringValue"];
+                for (int j = 0; j < 5; j++) {   
+                    jams[i][j] = strval[j];
+                }
+                i++;
+            }
+            jamslen = i;
+
+            for(int j = 0; j < jamslen; j++){
+                Serial.print("Times: ");
+                Serial.println(jams[j]);
+            }
         }
-        interval = doc["fields"]["interval"]["integerValue"].as<int>();
+        else {
+            Serial.print("Error code: ");
+            Serial.println(httpResponseCode);
+        }
+        // Free resources
+        http.end();
+
+
+        serverPath = "https://firestore.googleapis.com/v1/projects/cgfxienam/databases/(default)/documents/setting/interval";
+        http.begin(serverPath.c_str());
+        
+        // If you need Node-RED/server authentication, insert user and password below
+        //http.setAuthorization("REPLACE_WITH_SERVER_USERNAME", "REPLACE_WITH_SERVER_PASSWORD");
+        
+        // Send HTTP GET request
+        httpResponseCode = http.GET();
+        
+        if (httpResponseCode>0) {
+            Serial.print("HTTP Response code: ");
+            Serial.println(httpResponseCode);
+
+            String payload = http.getString();
+            Serial.println(payload);
+
+            JsonDocument doc;
+            DeserializationError error = deserializeJson(doc, payload.c_str());
+            if (error) {
+                Serial.print(F("deserializeJson() failed: "));
+                Serial.println(error.f_str());
+                return;
+            }
+            interval = doc["fields"]["interval"]["integerValue"].as<int>();
+
+            Serial.print("Interval: ");
+            Serial.println(interval);
+        }
+        else {
+            Serial.print("Error code: ");
+            Serial.println(httpResponseCode);
+        }
+        // Free resources
+        http.end();
+
     }
     else {
         Serial.println("WiFi Disconnected");
     }
 }
 
-void post() {
+void post_data(float ph, float tds, float temp, DateTime &now) {
     if (WiFi.status() == WL_CONNECTED) {
+        String postPath = "https://firestore.googleapis.com/v1/projects/cgfxienam/databases/(default)/documents/letest";
         // Your Domain name with URL path or IP address with path
-        http.begin(client, POST_DATA);
+        http.begin(postPath);
 
         // If you need Node-RED/server authentication, insert user and password below
         //http.setAuthorization("REPLACE_WITH_SERVER_USERNAME", "REPLACE_WITH_SERVER_PASSWORD");
 
-        String time = "";
+        String time = now.year() + String("/") + now.month() + String("/") + now.day() + String(" ");
+
         if (now.hour() < 10) time += "0";
         time += now.hour();
         time += ":";
         if (now.minute() < 10) time += "0";
         time += now.minute();
-        time += " ";
-        time += now.day();
-        time += "/";
-        time += now.month();
-        time += "/";
-        time += now.year();
 
         JsonDocument doc;
-        doc["fields"]["ph"]["doubleValue"] = getPH();
-        doc["fields"]["tds"]["doubleValue"] = gettds();
-        doc["fields"]["temp"]["doubleValue"] = getTMP();
+        doc["fields"]["ph"]["doubleValue"] = ph;
+        doc["fields"]["tds"]["doubleValue"] = tds;
+        doc["fields"]["temp"]["doubleValue"] = temp;
         doc["fields"]["time"]["stringValue"] = time.c_str();
         String jeson;
         serializeJson(doc, jeson);
@@ -136,46 +213,14 @@ void post() {
     }
 }
 
-void setup() {
-    Serial.begin(115200);
-    
-    WiFi.begin(SSID, PASS);
-    Serial.println("Connecting");
-    while(WiFi.status() != WL_CONNECTED) {
-        delay(500);
-        Serial.print(".");
-    }
-    Serial.println("");
-    Serial.print("Connected to WiFi network with IP Address: ");
-    Serial.println(WiFi.localIP());
-
-    if (!rtc.begin()) {
-        Serial.println("Couldn't find RTC");
-        Serial.flush();
-        while (1) delay(300);
-    }
-
-    if (rtc.lostPower()) {
-        Serial.println("RTC lost power, let's set the time!");
-    }
-    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
-
-    update();
-    lastAmbil = millis();
-}
-
-// String stime(DateTime& now) {
-//     return now.hour() + ":" + now.minute() + ":" + now.second() + " " + now.day() + "/" + now.month() + "/" + now.year();
-// }
-
-int getHour(const char* str) {
+int hour(const char* str) {
     String a;
     a += str[0];
     a += str[1];
 
     return a.toInt();
 }
-int getMint(const char* str) {
+int mint(const char* str) {
     String a;
     a += str[3];
     a += str[4];
@@ -183,45 +228,169 @@ int getMint(const char* str) {
     return a.toInt();
 }
 
-void loop() {
-    looptds();
-    now = rtc.now();
+void setup () {
+  Serial.begin(115200);
+  pinMode(TdsSensorPin,INPUT);
+   ph4502c.init();
 
-    if ((millis() - lastAmbil) >= INTERVAL_AMBIL*1000) {
-        update();
-        lastAmbil = millis();
-    }
-    if ((millis() - lastUpdate) >= INTERVAL_UPDATE*1000) {
-        post();
-        lastUpdate = millis();
-    }
+#ifndef ESP8266
+  while (!Serial); // wait for serial port to connect. Needed for native USB
+#endif
 
-    // if ((millis()-last)/1000 > 10) {
-    //     last = millis();
+  if (! rtc.begin()) {
+    Serial.println("Couldn't find RTC");
+    Serial.flush();
+    while (1) delay(10);
+  }
 
-    //     float tdsval = gettds();
-    //     // createDocfb(tdsval, 6145, 542, stime(now));
-    //     // cnt++;
-    // }
+  if (rtc.lostPower()) {
+    Serial.println("RTC lost power, let's set the time!");
+    // When time needs to be set on a new device, or after a power loss, the
+    // following line sets the RTC to the date & time this sketch was compiled
+  //  rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+    // This line sets the RTC with an explicit date & time, for example to set
+    // January 21, 2014 at 3am you would call:
+    // rtc.adjust(DateTime(2024, 10, 27, 12, 44, 0));
+  }
 
-    int currentHour = now.hour();
-    int currentMinute = now.minute();
+  // When time needs to be re-set on a previously configured device, the
+  // following line sets the RTC to the date & time this sketch was compiled
+  //rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+  // This line sets the RTC with an explicit date & time, for example to set
+  // January 21, 2014 at 3am you would call:
+//rtc.adjust(DateTime(2024, 10, 27, 12, 44, 0));
+  WiFi.begin(ssid, password);
+  Serial.println("Connecting");
+  while(WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("");
+  Serial.print("Connected to WiFi network with IP Address: ");
+  Serial.println(WiFi.localIP());
 
-    for (int i = 0; i < lenj; i++) {
-        bool selisihMenit = currentMinute >= getMint(jams[i]) && (currentMinute - getMint(jams[i])) < TOL;
-        if (currentHour == getHour(jams[i]) && selisihMenit && !isPumpOn) {
-            isPumpOn = true;
-            pumpStartTime = millis();
-            pinMode(REL, OUTPUT);
-            Serial.println("Pump ON");
-            break; // Exit loop after turning on the pump
+
+}
+
+
+void loop () {
+    DateTime now = rtc.now();
+    int jam=now.hour();
+    int menit=now.minute();
+    int detik=now.second();
+    static unsigned long analogSampleTimepoint = millis();
+    if(millis()-analogSampleTimepoint > 40U){     //every 40 milliseconds,read the analog value from the ADC
+        analogSampleTimepoint = millis();
+        analogBuffer[analogBufferIndex] = analogRead(TdsSensorPin);    //read the analog value and store into the buffer
+        analogBufferIndex++;
+        if(analogBufferIndex == SCOUNT){ 
+            analogBufferIndex = 0;
+        }
+    }   
+
+    static unsigned long printTimepoint = millis();
+    if(millis()-printTimepoint > 800U){
+        printTimepoint = millis();
+        for(copyIndex=0; copyIndex<SCOUNT; copyIndex++){
+            analogBufferTemp[copyIndex] = analogBuffer[copyIndex];
+            
+            // read the analog value more stable by the median filtering algorithm, and convert to voltage value
+            averageVoltage = getMedianNum(analogBufferTemp,SCOUNT) * (float)VREF / 4096.0;
+            
+            //temperature compensation formula: fFinalResult(25^C) = fFinalResult(current)/(1.0+0.02*(fTP-25.0)); 
+            float compensationCoefficient = 1.0+0.02*(temperature-25.0);
+            //temperature compensation
+            float compensationVoltage=averageVoltage/compensationCoefficient;
+            
+            //convert voltage value to tds value
+            tdsValue=(133.42*compensationVoltage*compensationVoltage*compensationVoltage - 255.86*compensationVoltage*compensationVoltage + 857.39*compensationVoltage)*0.5;
+            
+            //Serial.print("voltage:");
+            //Serial.print(averageVoltage,2);
+            //Serial.print("V   ");
+            Serial.print("TDS Value:");
+            Serial.print(tdsValue,0);
+            Serial.println("ppm");
         }
     }
 
-    // Check if the pump needs to be turned off
-    if (isPumpOn && (millis() - pumpStartTime >= interval*1000)) {
-        isPumpOn = false;
-        pinMode(REL, INPUT);
-        Serial.println("Pump OFF");
+    Serial.println("Water Temperature reading:"
+        + String(ph4502c.read_temp()));
+
+    // Read the pH level by average
+    Serial.println("pH Level Reading: "
+        + String(ph4502c.read_ph_level()));
+
+    // Read a single pH level value
+    Serial.println("pH Level Single Reading: "
+        + String(ph4502c.read_ph_level_single()));
+
+    Serial.print("Temperature: ");
+    Serial.print(rtc.getTemperature());
+    Serial.println(" C");
+
+    Serial.print(now.year(), DEC);
+    Serial.print('/');
+    Serial.print(now.month(), DEC);
+    Serial.print('/');
+    Serial.print(now.day(), DEC);
+    Serial.print(" (");
+    Serial.print(daysOfTheWeek[now.dayOfTheWeek()]);
+    Serial.print(") ");
+    Serial.print(jam, DEC);
+    Serial.print(':');
+    Serial.print(menit, DEC);
+    Serial.print(':');
+    Serial.print(detik, DEC);
+    Serial.println();
+
+    time_str = "";
+
+    if (jam < 10)
+     {time_str += "0";}
+    time_str += now.hour();
+    time_str += ":";
+    if (now.minute() < 10) 
+      {time_str += "0";}
+    time_str += now.minute();
+
+    static unsigned long siramTimep = 0;
+    static bool lagiNyiram = false;
+    for (int i = 0; i < jamslen; i++) {
+        Serial.print("checking: ");
+        Serial.print(jams[i]);
+        Serial.print(" with ");
+        Serial.println(time_str);
+        int selisihMenit = menit - mint(jams[i]);
+        if(jam == hour(jams[i]) && selisihMenit >= 0 && selisihMenit <= TOL){
+            pinMode(relay, OUTPUT);
+            lagiNyiram = true;
+            siramTimep = millis();
+        }
     }
+
+    if (!lagiNyiram) {
+        pinMode(relay, INPUT);
+    }
+
+    if (lagiNyiram && millis()-siramTimep >= interval*1000) {
+        pinMode(relay, INPUT);
+        lagiNyiram = false;
+    }
+
+    Serial.println();
+    
+    static unsigned long getDataTimep = millis();
+    if (millis() - getDataTimep > INTER_GET*1000) {
+        getDataTimep = millis();
+        get_data();
+    }
+
+    static unsigned long postDataTimep = millis();
+    if (millis() - postDataTimep > INTER_POST*1000) {
+        postDataTimep = millis();
+        post_data(ph4502c.read_ph_level(), tdsValue, rtc.getTemperature(), now);
+    }
+
+    delay(100);
 }
