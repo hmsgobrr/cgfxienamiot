@@ -13,7 +13,7 @@
 #define MAXJAM 50               // maksimal 50 waktu penyiraman berbeda dalam sehari
 #define REL 5                   // PIN RELAY
 #define TOL 15                  // Toleransi telat meniram (menit)
-#define INTERVAL_AMBIL 60       // Akan ngambil data (interval + waktu nyiram) tiap 60 detik
+#define INTERVAL_AMBIL 30       // Akan ngambil data (interval + waktu nyiram) tiap 60 detik
 #define INTERVAL_UPDATE 5      // Akan ngambil data (interval + waktu nyiram) tiap 60 detik
 
 

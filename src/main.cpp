@@ -1,8 +1,10 @@
  // Date and time functions using a DS3231 RTC connected via I2C and Wire lib
+#include <SPI.h>
 #include "RTClib.h"
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
+
 
 #define TdsSensorPin 33
 const int relay = 5;
@@ -18,8 +20,11 @@ float averageVoltage = 0;
 float tdsValue = 0;
 float temperature = 25;       // current temperature for compensation
 
-const char* ssid = "CIKUTRA 13";
-const char* password = "cikutra013";
+bool mindelay = false;
+// const char* ssid = "AULA ALCENT";
+// const char* password = "aula48alcent";
+const char* ssid = "RUANG 303";
+const char* password = "alfadp303uu";
 String time_str;
 
 const int MAXJAM = 50;
@@ -28,8 +33,8 @@ int jamslen;
 int interval = 10;
 
 const int TOL = 10;         // Toleransi keterlambatan menyiram (karena perangkat mati atau hal lain), dalam menit
-const int INTER_POST = 5;   // Interval POST data ph, suhu, dan tds, dalam detik
-const int INTER_GET = 2;    // Interval GET data setting jam-jam, dan durasi penyiraman, dalam detik;
+const int INTER_POST = 15;   // Interval POST data ph, suhu, dan tds, dalam detik (MINIMAL 4.32 detik)
+const int INTER_GET = 10;    // Interval GET data setting jam-jam, dan durasi penyiraman, dalam detik (MINIMAL 3.46 detik)
 
 HTTPClient http;
 RTC_DS3231 rtc;
@@ -86,6 +91,7 @@ int getMedianNum(int bArray[], int iFilterLen){
 
 void get_data(){
     if(WiFi.status()== WL_CONNECTED) {
+        unsigned long startget = millis();
         String serverPath = "https://firestore.googleapis.com/v1/projects/cgfxienam/databases/(default)/documents/setting/timer";
         http.begin(serverPath.c_str());
 
@@ -125,6 +131,8 @@ void get_data(){
                 Serial.print("Times: ");
                 Serial.println(jams[j]);
             }
+            Serial.print("Delay GET total: ");
+            Serial.println(millis()-startget);
         }
         else {
             Serial.print("Error code: ");
@@ -177,6 +185,7 @@ void get_data(){
 
 void post_data(float ph, float tds, float temp, DateTime &now) {
     if (WiFi.status() == WL_CONNECTED) {
+        unsigned long startpost = millis();
         String postPath = "https://firestore.googleapis.com/v1/projects/cgfxienam/databases/(default)/documents/letest";
         // Your Domain name with URL path or IP address with path
         http.begin(postPath);
@@ -208,6 +217,9 @@ void post_data(float ph, float tds, float temp, DateTime &now) {
 
         // Free resources
         http.end();
+
+        Serial.print("Delay POST total: ");
+        Serial.println(millis()-startpost);
     } else {
         Serial.println("WiFi Disconnected");
     }
@@ -231,7 +243,8 @@ int mint(const char* str) {
 void setup () {
   Serial.begin(115200);
   pinMode(TdsSensorPin,INPUT);
-   ph4502c.init();
+  ph4502c.init();
+  pinMode(relay, INPUT);
 
 #ifndef ESP8266
   while (!Serial); // wait for serial port to connect. Needed for native USB
@@ -247,18 +260,17 @@ void setup () {
     Serial.println("RTC lost power, let's set the time!");
     // When time needs to be set on a new device, or after a power loss, the
     // following line sets the RTC to the date & time this sketch was compiled
-  //  rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+   rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
     // This line sets the RTC with an explicit date & time, for example to set
     // January 21, 2014 at 3am you would call:
     // rtc.adjust(DateTime(2024, 10, 27, 12, 44, 0));
   }
-
   // When time needs to be re-set on a previously configured device, the
   // following line sets the RTC to the date & time this sketch was compiled
   //rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
-  // This line sets the RTC with an explicit date & time, for example to set
+  // This line setsthe RTC with an explicit date & time, for example to set
   // January 21, 2014 at 3am you would call:
-//rtc.adjust(DateTime(2024, 10, 27, 12, 44, 0));
+  //rtc.adjust(DateTime(2024, 10, 27, 12, 44, 0));
   WiFi.begin(ssid, password);
   Serial.println("Connecting");
   while(WiFi.status() != WL_CONNECTED) {
@@ -325,8 +337,9 @@ void loop () {
     Serial.println("pH Level Single Reading: "
         + String(ph4502c.read_ph_level_single()));
 
+    temperature = rtc.getTemperature();
     Serial.print("Temperature: ");
-    Serial.print(rtc.getTemperature());
+    Serial.print(temperature);
     Serial.println(" C");
 
     Serial.print(now.year(), DEC);
@@ -361,21 +374,34 @@ void loop () {
         Serial.print(jams[i]);
         Serial.print(" with ");
         Serial.println(time_str);
-        int selisihMenit = menit - mint(jams[i]);
-        if(jam == hour(jams[i]) && selisihMenit >= 0 && selisihMenit <= TOL){
+        unsigned int ae = millis() - siramTimep;
+        if(!lagiNyiram && jam == hour(jams[i]) && menit == mint(jams[i]) && (siramTimep == 0 || ae > 60000)){
             pinMode(relay, OUTPUT);
             lagiNyiram = true;
             siramTimep = millis();
         }
     }
+    Serial.print("SiramTemp ");
+    Serial.println(siramTimep);
+    Serial.print("LagiNyiram ");
+    Serial.println(lagiNyiram);
+    Serial.print("MILIS ");
+    Serial.println(millis()-siramTimep);
+    Serial.print("neles ");
+    Serial.println(millis());
+    
 
     if (!lagiNyiram) {
         pinMode(relay, INPUT);
+        mindelay = true;
     }
 
-    if (lagiNyiram && millis()-siramTimep >= interval*1000) {
+    if (lagiNyiram && millis()-siramTimep >= interval*1000 && mindelay == true) {
+    Serial.println("MASUKIF ");
+
         pinMode(relay, INPUT);
         lagiNyiram = false;
+        mindelay = false;
     }
 
     Serial.println();
@@ -392,5 +418,5 @@ void loop () {
         post_data(ph4502c.read_ph_level(), tdsValue, rtc.getTemperature(), now);
     }
 
-    delay(100);
+    delay(250);
 }
