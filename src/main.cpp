@@ -1,10 +1,18 @@
  // Date and time functions using a DS3231 RTC connected via I2C and Wire lib
 #include <SPI.h>
+
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
 #include "RTClib.h"
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 
+#define SCREEN_WIDTH 128 // OLED display width, in pixels
+#define SCREEN_HEIGHT 64 // OLED display height, in pixels
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
 #define TdsSensorPin 33
 const int relay = 5;
@@ -33,8 +41,8 @@ int jamslen;
 int interval = 10;
 
 const int TOL = 10;         // Toleransi keterlambatan menyiram (karena perangkat mati atau hal lain), dalam menit
-const int INTER_POST = 15;   // Interval POST data ph, suhu, dan tds, dalam detik (MINIMAL 4.32 detik)
-const int INTER_GET = 10;    // Interval GET data setting jam-jam, dan durasi penyiraman, dalam detik (MINIMAL 3.46 detik)
+const int INTER_POST = 40;   // Interval POST data ph, suhu, dan tds, dalam detik (MINIMAL 4.32 detik)
+const int INTER_GET = 15;    // Interval GET data setting jam-jam, dan durasi penyiraman, dalam detik (MINIMAL 3.46 detik)
 
 HTTPClient http;
 RTC_DS3231 rtc;
@@ -246,6 +254,11 @@ void setup () {
   ph4502c.init();
   pinMode(relay, INPUT);
 
+  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println(F("SSD1306 allocation failed"));
+    for(;;);
+  }
+
 #ifndef ESP8266
   while (!Serial); // wait for serial port to connect. Needed for native USB
 #endif
@@ -260,7 +273,7 @@ void setup () {
     Serial.println("RTC lost power, let's set the time!");
     // When time needs to be set on a new device, or after a power loss, the
     // following line sets the RTC to the date & time this sketch was compiled
-   rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
     // This line sets the RTC with an explicit date & time, for example to set
     // January 21, 2014 at 3am you would call:
     // rtc.adjust(DateTime(2024, 10, 27, 12, 44, 0));
@@ -281,7 +294,9 @@ void setup () {
   Serial.print("Connected to WiFi network with IP Address: ");
   Serial.println(WiFi.localIP());
 
-
+  delay(2000);
+  display.clearDisplay();
+  display.setTextColor(WHITE);
 }
 
 
@@ -418,5 +433,35 @@ void loop () {
         post_data(ph4502c.read_ph_level(), tdsValue, rtc.getTemperature(), now);
     }
 
-    delay(250);
+    time_str += ":";
+    if (now.second() < 10) 
+      {time_str += "0";}
+    time_str += now.second();
+
+    display.clearDisplay();
+    // display temperature
+    display.setTextSize(1);
+    display.setCursor(0,0);
+    display.print("Waktu Jam Digital: ");
+    display.setTextSize(2);
+    display.setCursor(0,10);
+    display.print(time_str);
+    // display.print(" ");
+    // display.setTextSize(1);
+    // display.cp437(true);
+    // display.write(167);
+    // display.setTextSize(2);
+    // display.print("WIB");
+    
+    // display humidity
+    // display.setTextSize(1);
+    // display.setCursor(0, 35);
+    // display.print("Humidity: ");
+    // display.setTextSize(2);
+    // display.setCursor(0, 45);
+    // display.print(String(bme.readHumidity()));
+    // display.print(" %"); 
+    
+    display.display();
+    delay(500);
 }
